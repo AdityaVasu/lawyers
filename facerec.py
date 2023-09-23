@@ -1,91 +1,75 @@
 import cv2
-import face_recognition
 import pymongo
 import io
 import requests
 import numpy as np
+from skimage import metrics
 
 # Connect to your MongoDB database
 client = pymongo.MongoClient("mongodb+srv://user:user@cluster0.a87ri9o.mongodb.net/?retryWrites=true&w=majority")
 db = client["test"]
 collection = db["lawyers"]
 
-def get_user_data(barcouncil_no):
+def get_user_image(barcouncil_no):
     # Query the MongoDB collection to retrieve user data based on Barcouncil number
     user_data = collection.find_one({"BarcouncilNO": barcouncil_no})
-    return user_data
+    if user_data is not None:
+        image_url = user_data.get("profileImage")
+        if image_url:
+            response = requests.get(image_url)
+            if response.status_code == 200:
+                image_bytes = io.BytesIO(response.content)
+                image = cv2.imdecode(np.frombuffer(image_bytes.read(), np.uint8), cv2.IMREAD_COLOR)
+                return image
+    return None
 
-def add_user(user_data):
-    # Capture and store the user's face encoding
-    image_url = user_data["profileImage"]
-    response = requests.get(image_url)
+def capture_image_from_webcam():
+    # Open the webcam
+    cap = cv2.VideoCapture(0)
+
+    success, img = cap.read()
+
+    # Release the webcam
+    cap.release()
     
-    if response.status_code == 200:
-        image_bytes = io.BytesIO(response.content)
-        image_array = np.frombuffer(image_bytes.read(), np.uint8)
-        image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-        face_encodings = face_recognition.face_encodings(image)
+    return img
 
-        if len(face_encodings) > 0:
-            user_data["encode"] = face_encodings[0].tolist()
-            collection.insert_one(user_data)
-            print("User added successfully.")
-        else:
-            print("No face found in the provided image.")
-    else:
-        print("Failed to retrieve user image from the URL")
+def resize_image(image, target_width, target_height):
+    return cv2.resize(image, (target_width, target_height))
+
+def compare_images(image1, image2):
+    # Ensure both images have the same dimensions
+    if image1.shape != image2.shape:
+        raise ValueError("Input images must have the same dimensions.")
+
+    # Convert images to grayscale for SSIM comparison
+    gray_image1 = cv2.cvtColor(image1, cv2.COLOR_BGR2GRAY)
+    gray_image2 = cv2.cvtColor(image2, cv2.COLOR_BGR2GRAY)
+
+    # Calculate SSIM score
+    ssim_score = metrics.structural_similarity(gray_image1, gray_image2)
+    return ssim_score
 
 def main():
     # Capture Barcouncil number as user input
     barcouncil_no = input("Enter your Barcouncil number: ")
 
-    # Retrieve user data based on the Barcouncil number
-    user_data = get_user_data(barcouncil_no)
+    # Retrieve user image from the database
+    user_image = get_user_image(barcouncil_no)
 
-    if user_data is None:
-        print("User not found in the database")
+    if user_image is None:
+        print("User not found in the database.")
         return
 
-    # Load the image from the URL stored in the database
-    image_url = user_data["profileImage"]
-    response = requests.get(image_url)
-    
-    if response.status_code == 200:
-        image_bytes = io.BytesIO(response.content)
-        image_array = np.frombuffer(image_bytes.read(), np.uint8)
-        image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    else:
-        print("Failed to retrieve user image from the URL")
-        return
+    # Capture an image from the webcam
+    webcam_image = capture_image_from_webcam()
 
-    # Open the webcam
-    cap = cv2.VideoCapture(0)
+    # Resize the webcam image to match the dimensions of the user image
+    webcam_image = resize_image(webcam_image, user_image.shape[1], user_image.shape[0])
 
-    while True:
-        success, img = cap.read()
-        imgS = cv2.resize(img, (0, 0), None, 0.25, 0.25)
-        imgS = cv2.cvtColor(imgS, cv2.COLOR_BGR2RGB)
-
-        faces_cur_frame = face_recognition.face_locations(imgS)
-        encodes_cur_frame = face_recognition.face_encodings(imgS, faces_cur_frame)
-
-        for encode_face, face_loc in zip(encodes_cur_frame, faces_cur_frame):
-            matches = face_recognition.compare_faces([encode_face], user_data["encode"])
-            face_dis = face_recognition.face_distance([encode_face], user_data["encode"])
-
-            match_index = np.argmin(face_dis)
-
-            if matches[match_index]:
-                name = user_data["BarcouncilNO"]
-                y1, x2, y2, x1 = face_loc
-                y1, x2, y2, x1 = y1 * 4, x2 * 4, y2 * 4, x1 * 4
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.rectangle(img, (x1, y2 - 35), (x2, y2), (0, 255, 0), cv2.FILLED)
-                cv2.putText(img, name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
-
-        cv2.imshow('Webcam', img)
-        cv2.waitKey(1)
+    # Compare the images
+    similarity_score = compare_images(user_image, webcam_image)
+    print(f"Image similarity score: {similarity_score:.2f}")
 
 if __name__ == "__main__":
     main()
